@@ -22,20 +22,18 @@ RUN if ! command -v uv >/dev/null 2>&1; then \
     mv /root/.local/bin/uvx /usr/local/bin/uvx; \
     fi
 
-# Install dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ -f uv.lock ]; then \
-    uv sync --frozen --no-install-project --no-editable; \
-    else \
-    uv sync --no-install-project --no-editable; \
-    fi
+# Install dependencies from my_env
+WORKDIR /app/my_env
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ -f uv.lock ]; then \
-    uv sync --frozen --no-editable; \
-    else \
-    uv sync --no-editable; \
-    fi
+# Create and use virtual environment
+RUN python -m venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
+
+# Install requirements
+RUN pip install -r /app/requirements-docker.txt
 
 # Final runtime stage
 FROM ${BASE_IMAGE}
@@ -43,13 +41,13 @@ FROM ${BASE_IMAGE}
 WORKDIR /app
 
 # Copy virtual environment from builder
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/venv /app/venv
 
 # Copy project code
 COPY --from=builder /app /app
 
 # Set PATH to use virtual environment
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/venv/bin:$PATH"
 ENV PYTHONPATH="/app:$PYTHONPATH"
 
 # Environment configuration
