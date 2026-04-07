@@ -1,0 +1,128 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.env.local
+*.sublime-project
+*.sublime-workspace
+
+# Environment Variables (IMPORTANT: Never commit real tokens)
+.env
+.env.local
+.env.*.local
+
+# Keep example for reference
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+logs/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.whl
+
+# Model Checkpoints (optional - can be large)
+checkpoints/
+models/
+*.pt
+*.pth
+*.ckpt
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Project specific
+.sixth/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Node (if using frontend tools)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Credentials & Secrets
+.aws/
+.gcp/
+secrets/
+credentials/
+*.key
+*.pem
+
+# Large data files
+*.csv
+*.json
+data/
+
+# System files
+*.exe
+*.dll
+.env.production
+.env.staging
