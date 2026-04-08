@@ -141,18 +141,32 @@ def get_action_from_llm(client: OpenAI, obs: Dict[str, Any], step: int) -> str:
     """Use LLM to generate next action."""
     try:
         max_zone_id = NUM_ZONES - 1
+        temps = obs.get('zone_temperatures', [])
+        cooling = obs.get('zone_cooling_levels', [])
+        energy = obs.get('total_energy_consumption', 0)
         prompt = (
-            f"You control a data center cooling system.\n"
-            f"Current state (step {step}):\n"
-            f"- Zone temps: {obs.get('zone_temperatures', [])}\n"
-            f"- Cooling: {obs.get('zone_cooling_levels', [])}\n"
-            f"- Energy: {obs.get('total_energy_consumption', 0):.1f}\n\n"
-            f"Output action: COOL zone_id=<0-{max_zone_id}> adjustment=<0.0-1.0>"
+            f"Data center cooling control. Step {step}.\n"
+            f"Zone temperatures: {temps}\n"
+            f"Zone cooling levels: {cooling}\n"
+            f"Total energy: {energy:.1f}\n\n"
+            f"Respond with EXACTLY this format and nothing else:\n"
+            f"COOL zone_id=<N> adjustment=<F>\n"
+            f"Where N is 0-{max_zone_id} (zone to cool) and F is 0.1-1.0 (cooling strength).\n"
+            f"Example: COOL zone_id=2 adjustment=0.8\n"
+            f"Your response (one line only):"
         )
         logger.debug("Requesting LLM action at step %d", step)
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": (
+                    "You are a data center cooling controller. "
+                    f"Respond with EXACTLY one line in this format: COOL zone_id=<N> adjustment=<F> "
+                    f"where N is an integer 0-{max_zone_id} and F is a float 0.1-1.0. "
+                    "No explanation, no extra text, just that one line."
+                )},
+                {"role": "user", "content": prompt},
+            ],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
@@ -253,8 +267,9 @@ async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
                     steps_taken = step
 
                     done_str = "true" if done else "false"
+                    safe_action = action_str.replace("\n", " ").replace("\r", " ")
                     step_line = (
-                        f"[STEP] step={step} action={action_str} "
+                        f"[STEP] step={step} action={safe_action} "
                         f"reward={reward:.2f} done={done_str} error=null"
                     )
                     print(step_line, flush=True)
@@ -270,9 +285,10 @@ async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
                 except Exception as exc:
                     final_error = str(exc)
                     logger.error("Step %d error: %s", step, exc)
+                    safe_action = action_str.replace("\n", " ").replace("\r", " ")
                     error_str = f'"{final_error}"'
                     step_line = (
-                        f"[STEP] step={step} action={action_str} "
+                        f"[STEP] step={step} action={safe_action} "
                         f"reward=0.00 done=true error={error_str}"
                     )
                     print(step_line, flush=True)
