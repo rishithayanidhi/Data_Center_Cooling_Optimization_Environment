@@ -5,9 +5,7 @@ Inference script for Data Center Cooling Optimization Environment.
 EXACT OUTPUT FORMAT REQUIRED BY JUDGES (Organizer Spec):
 - [START] task=<task_name> env=<benchmark> model=<model_name>
 - [STEP] step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-- [END] success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
-
-Score: Normalized to [0, 1] based on total reward achieved.
+- [END] success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
 """
 
 import asyncio
@@ -21,7 +19,7 @@ from dataclasses import dataclass
 
 # Required: OpenAI Client
 try:
-    from openai import OpenAI, AzureOpenAI
+    from openai import OpenAI
 except ImportError:
     print("ERROR: OpenAI client not installed. Run: pip install openai", file=sys.stderr)
     sys.exit(1)
@@ -65,15 +63,22 @@ class _AuthEnv(DataCenterCoolingEnv):
 # Configuration — all values driven by environment variables
 # ============================================================================
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4-turbo")
-HF_TOKEN = os.getenv("HF_TOKEN", "")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "")
+# API_BASE_URL: LLM API endpoint (per submission spec)
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o")
+# HF_TOKEN: mandatory — used as api_key for the LLM client
+HF_TOKEN = os.getenv("HF_TOKEN")
+if HF_TOKEN is None:
+    raise ValueError("HF_TOKEN environment variable is required")
+# ENV_BASE_URL: URL of the deployed environment server (our HF Space)
+ENV_BASE_URL = os.getenv(
+    "ENV_BASE_URL",
+    "https://rishithayanidhi-datacenter-cooling-optimization.hf.space",
+)
 BENCHMARK = os.getenv("BENCHMARK", "datacenter-cooling")
 MAX_STEPS = int(os.getenv("MAX_STEPS", "50"))
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "200"))
-AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "2024-02-15-preview")
 LOG_FILE = os.getenv("LOG_FILE", "inference.log")
 NUM_ZONES = int(os.getenv("NUM_ZONES", "4"))
 FALLBACK_ADJUSTMENT = float(os.getenv("FALLBACK_ADJUSTMENT", "0.5"))
@@ -124,21 +129,11 @@ logger = _setup_logger()
 def get_llm_client() -> OpenAI:
     """Initialize OpenAI client with proper configuration."""
     try:
-        if os.getenv("AZURE_API_KEY"):
-            logger.info("Initialising AzureOpenAI client (endpoint=%s, version=%s)",
-                        os.getenv("AZURE_ENDPOINT"), AZURE_API_VERSION)
-            return AzureOpenAI(
-                api_key=os.getenv("AZURE_API_KEY"),
-                api_version=AZURE_API_VERSION,
-                azure_endpoint=os.getenv("AZURE_ENDPOINT"),
-            )
-        else:
-            openai_base_url = os.getenv("OPENAI_BASE_URL")  # separate from env API_BASE_URL
-            logger.info("Initialising OpenAI client (base_url=%s, model=%s)", openai_base_url or "default", MODEL_NAME)
-            return OpenAI(
-                api_key=os.getenv("OPENAI_API_KEY", "sk-mock"),
-                base_url=openai_base_url or None,
-            )
+        logger.info("Initialising OpenAI client (base_url=%s, model=%s)", API_BASE_URL, MODEL_NAME)
+        return OpenAI(
+            base_url=API_BASE_URL,
+            api_key=HF_TOKEN,
+        )
     except Exception as exc:
         logger.error("Failed to initialise LLM client: %s", exc)
         raise
@@ -226,8 +221,8 @@ async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
     action_str = "COOL zone_id=0 adjustment=0.0"  # safe default for error paths
 
     try:
-        async with _AuthEnv(base_url=API_BASE_URL, hf_token=HF_TOKEN) as env:
-            logger.info("Connected to environment at %s", API_BASE_URL)
+        async with _AuthEnv(base_url=ENV_BASE_URL, hf_token=HF_TOKEN) as env:
+            logger.info("Connected to environment at %s", ENV_BASE_URL)
 
             # Reset
             try:
@@ -302,7 +297,7 @@ async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
 
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     success_str = "true" if success else "false"
-    end_line = f"[END] success={success_str} steps={steps_taken} score={score:.4f} rewards={rewards_str}"
+    end_line = f"[END] success={success_str} steps={steps_taken} score={score:.2f} rewards={rewards_str}"
     print(end_line, flush=True)
     logger.info(end_line)
 
