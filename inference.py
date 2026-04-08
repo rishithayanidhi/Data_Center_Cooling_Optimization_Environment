@@ -29,9 +29,36 @@ except ImportError:
 # Environment imports
 try:
     from my_env import DataCenterCoolingEnv, CoolingAction, CoolingObservation
+    from websockets.asyncio.client import connect as _ws_connect
 except ImportError:
     print("ERROR: my_env not installed. Run: pip install -e my_env", file=sys.stderr)
     sys.exit(1)
+
+
+class _AuthEnv(DataCenterCoolingEnv):
+    """DataCenterCoolingEnv that injects an Authorization header into the
+    WebSocket handshake, needed when connecting to a private HF Space."""
+
+    def __init__(self, *args, hf_token: str = "", **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hf_token = hf_token
+
+    async def connect(self):
+        if self._ws is not None:
+            return self
+        headers = {}
+        if self._hf_token:
+            headers["Authorization"] = f"Bearer {self._hf_token}"
+        try:
+            self._ws = await _ws_connect(
+                self._ws_url,
+                open_timeout=self._connect_timeout,
+                max_size=self._max_message_size,
+                additional_headers=headers or None,
+            )
+        except Exception as e:
+            raise ConnectionError(f"Failed to connect to {self._ws_url}: {e}") from e
+        return self
 
 
 # ============================================================================
@@ -199,7 +226,7 @@ async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
     action_str = "COOL zone_id=0 adjustment=0.0"  # safe default for error paths
 
     try:
-        async with DataCenterCoolingEnv(base_url=API_BASE_URL) as env:
+        async with _AuthEnv(base_url=API_BASE_URL, hf_token=HF_TOKEN) as env:
             logger.info("Connected to environment at %s", API_BASE_URL)
 
             # Reset
