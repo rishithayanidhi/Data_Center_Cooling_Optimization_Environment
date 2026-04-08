@@ -11,8 +11,11 @@ Score: Normalized to [0, 1] based on total reward achieved.
 """
 
 import asyncio
+import logging
 import os
 import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
@@ -32,20 +35,59 @@ except ImportError:
 
 
 # ============================================================================
-# Configuration
+# Configuration — all values driven by environment variables
 # ============================================================================
 
-# Required environment variables
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4-turbo")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "")
+BENCHMARK = os.getenv("BENCHMARK", "datacenter-cooling")
+MAX_STEPS = int(os.getenv("MAX_STEPS", "50"))
+TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "200"))
+AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "2024-02-15-preview")
+LOG_FILE = os.getenv("LOG_FILE", "inference.log")
+NUM_ZONES = int(os.getenv("NUM_ZONES", "4"))
+FALLBACK_ADJUSTMENT = float(os.getenv("FALLBACK_ADJUSTMENT", "0.5"))
+VIOLATION_TEMP_THRESHOLD = float(os.getenv("VIOLATION_TEMP_THRESHOLD", "50.0"))
 
-# Defaults
-BENCHMARK = "datacenter-cooling"
-MAX_STEPS = 50
-TEMPERATURE = 0.7
-MAX_TOKENS = 200
+
+# ============================================================================
+# Logging setup — file + console
+# ============================================================================
+
+def _setup_logger() -> logging.Logger:
+    """Configure a logger that writes to both stdout and a rotating log file."""
+    log_dir = Path(LOG_FILE).parent
+    if str(log_dir) != ".":
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("inference")
+    logger.setLevel(logging.DEBUG)
+
+    if not logger.handlers:
+        fmt = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+
+        # File handler
+        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+        # Console handler (stderr so it doesn't pollute judge stdout)
+        ch = logging.StreamHandler(sys.stderr)
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+
+    return logger
+
+
+logger = _setup_logger()
 
 
 # ============================================================================
@@ -54,42 +96,54 @@ MAX_TOKENS = 200
 
 def get_llm_client() -> OpenAI:
     """Initialize OpenAI client with proper configuration."""
-    if os.getenv("AZURE_API_KEY"):
-        return AzureOpenAI(
-            api_key=os.getenv("AZURE_API_KEY"),
-            api_version="2024-02-15-preview",
-            azure_endpoint=os.getenv("AZURE_ENDPOINT"),
-        )
-    else:
-        return OpenAI(
-            api_key=HF_TOKEN or os.getenv("OPENAI_API_KEY", "sk-mock"),
-            base_url=API_BASE_URL if "http" in API_BASE_URL else None,
-        )
+    try:
+        if os.getenv("AZURE_API_KEY"):
+            logger.info("Initialising AzureOpenAI client (endpoint=%s, version=%s)",
+                        os.getenv("AZURE_ENDPOINT"), AZURE_API_VERSION)
+            return AzureOpenAI(
+                api_key=os.getenv("AZURE_API_KEY"),
+                api_version=AZURE_API_VERSION,
+                azure_endpoint=os.getenv("AZURE_ENDPOINT"),
+            )
+        else:
+            logger.info("Initialising OpenAI client (base_url=%s, model=%s)", API_BASE_URL, MODEL_NAME)
+            return OpenAI(
+                api_key=HF_TOKEN or os.getenv("OPENAI_API_KEY", "sk-mock"),
+                base_url=API_BASE_URL if "http" in API_BASE_URL else None,
+            )
+    except Exception as exc:
+        logger.error("Failed to initialise LLM client: %s", exc)
+        raise
 
 
 def get_action_from_llm(client: OpenAI, obs: Dict[str, Any], step: int) -> str:
     """Use LLM to generate next action."""
     try:
-        prompt = f"""You control a data center cooling system.
-Current state (step {step}):
-- Zone temps: {obs.get('zone_temperatures', [])}
-- Cooling: {obs.get('zone_cooling_levels', [])}
-- Energy: {obs.get('total_energy_consumption', 0):.1f}
-
-Output action: COOL zone_id=<0-3> adjustment=<0.0-1.0>"""
-        
+        max_zone_id = NUM_ZONES - 1
+        prompt = (
+            f"You control a data center cooling system.\n"
+            f"Current state (step {step}):\n"
+            f"- Zone temps: {obs.get('zone_temperatures', [])}\n"
+            f"- Cooling: {obs.get('zone_cooling_levels', [])}\n"
+            f"- Energy: {obs.get('total_energy_consumption', 0):.1f}\n\n"
+            f"Output action: COOL zone_id=<0-{max_zone_id}> adjustment=<0.0-1.0>"
+        )
+        logger.debug("Requesting LLM action at step %d", step)
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        return response.choices[0].message.content.strip().split('\n')[0]
-    except Exception as e:
+        action = response.choices[0].message.content.strip().split('\n')[0]
+        logger.debug("LLM action step=%d: %s", step, action)
+        return action
+    except Exception as exc:
         # Fallback: greedy zone selection
-        temps = obs.get('zone_temperatures', [0]*4)
-        hottest_zone = temps.index(max(temps))
-        return f"COOL zone_id={hottest_zone} adjustment=0.5"
+        logger.warning("LLM call failed at step %d (%s); using greedy fallback", step, exc)
+        temps = obs.get('zone_temperatures', [0] * NUM_ZONES)
+        hottest_zone = temps.index(max(temps)) if temps else 0
+        return f"COOL zone_id={hottest_zone} adjustment={FALLBACK_ADJUSTMENT}"
 
 
 def parse_action(action_str: str) -> CoolingAction:
@@ -97,17 +151,22 @@ def parse_action(action_str: str) -> CoolingAction:
     try:
         # Format: COOL zone_id=X adjustment=Y
         parts = action_str.split()
-        zone_id, adjustment = 0, 0.1
-        
+        zone_id: int = 0
+        adjustment: float = FALLBACK_ADJUSTMENT
+
         for part in parts:
             if part.startswith("zone_id="):
-                zone_id = int(part.split("=")[1])
+                raw_zone = int(part.split("=")[1])
+                zone_id = max(0, min(NUM_ZONES - 1, raw_zone))
             elif part.startswith("adjustment="):
-                adjustment = float(part.split("=")[1])
-        
+                raw_adj = float(part.split("=")[1])
+                adjustment = max(-1.0, min(1.0, raw_adj))
+
+        logger.debug("Parsed action: zone_id=%d adjustment=%.3f", zone_id, adjustment)
         return CoolingAction(zone_id=zone_id, cooling_adjustment=adjustment)
-    except:
-        return CoolingAction(zone_id=0, cooling_adjustment=0.1)
+    except Exception as exc:
+        logger.warning("Failed to parse action '%s': %s — using default", action_str, exc)
+        return CoolingAction(zone_id=0, cooling_adjustment=FALLBACK_ADJUSTMENT)
 
 
 # ============================================================================
@@ -116,143 +175,193 @@ def parse_action(action_str: str) -> CoolingAction:
 
 async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
     """Run single episode with exact output format."""
-    client = get_llm_client()
-    
-    # [START] line
+    logger.info("=== Episode start: task=%s difficulty=%s model=%s ===", task, difficulty, MODEL_NAME)
+
+    try:
+        client = get_llm_client()
+    except Exception as exc:
+        logger.critical("Cannot create LLM client: %s", exc)
+        print(f"[START] task={task} env={BENCHMARK} model={MODEL_NAME}", flush=True)
+        print(f"[END] success=false steps=0 score=0.00 rewards=", flush=True)
+        return {"task": task, "difficulty": difficulty, "success": False,
+                "steps": 0, "total_reward": 0.0, "avg_reward": 0.0,
+                "score": 0.0, "rewards": []}
+
+    # [START] line — required by judge spec
     print(f"[START] task={task} env={BENCHMARK} model={MODEL_NAME}", flush=True)
-    
-    rewards = []
+    logger.info("[START] task=%s env=%s model=%s", task, BENCHMARK, MODEL_NAME)
+
+    rewards: List[float] = []
     steps_taken = 0
     success = False
-    final_error = None
-    
+    final_error: Optional[str] = None
+    action_str = "COOL zone_id=0 adjustment=0.0"  # safe default for error paths
+
     try:
         async with DataCenterCoolingEnv(base_url=API_BASE_URL) as env:
+            logger.info("Connected to environment at %s", API_BASE_URL)
+
             # Reset
-            result = await env.reset()
-            obs = result.observation
-            
+            try:
+                result = await env.reset()
+                obs = result.observation
+                logger.info("Environment reset OK — initial temps: %s",
+                            getattr(obs, "zone_temperatures", []))
+            except Exception as exc:
+                logger.error("Environment reset failed: %s", exc)
+                raise
+
             # Episode loop
             for step in range(1, MAX_STEPS + 1):
                 try:
-                    # Format observation dict
-                    obs_dict = {
-                        'zone_temperatures': obs.zone_temperatures if hasattr(obs, 'zone_temperatures') else [],
-                        'zone_cooling_levels': obs.zone_cooling_levels if hasattr(obs, 'zone_cooling_levels') else [],
-                        'zone_workload_intensity': obs.zone_workload_intensity if hasattr(obs, 'zone_workload_intensity') else [],
-                        'total_energy_consumption': obs.total_energy_consumption if hasattr(obs, 'total_energy_consumption') else 0.0,
+                    obs_dict: Dict[str, Any] = {
+                        "zone_temperatures": getattr(obs, "zone_temperatures", []),
+                        "zone_cooling_levels": getattr(obs, "zone_cooling_levels", []),
+                        "zone_workload_intensity": getattr(obs, "zone_workload_intensity", []),
+                        "total_energy_consumption": getattr(obs, "total_energy_consumption", 0.0),
                     }
-                    
-                    # Get LLM action
+
                     action_str = get_action_from_llm(client, obs_dict, step)
                     action = parse_action(action_str)
-                    
-                    # Step environment
+
                     step_result = await env.step(action)
                     reward = float(step_result.reward) if step_result.reward is not None else 0.0
                     done = bool(step_result.done) if step_result.done else False
-                    
+
                     rewards.append(reward)
                     steps_taken = step
-                    
-                    # [STEP] line - EXACT FORMAT
+
                     done_str = "true" if done else "false"
-                    error_str = "null"
-                    print(f"[STEP] step={step} action={action_str} reward={reward:.2f} done={done_str} error={error_str}", flush=True)
-                    
+                    step_line = (
+                        f"[STEP] step={step} action={action_str} "
+                        f"reward={reward:.2f} done={done_str} error=null"
+                    )
+                    print(step_line, flush=True)
+                    logger.info(step_line)
+
                     if done:
                         success = True
+                        logger.info("Episode completed successfully at step %d", step)
                         break
-                    
+
                     obs = step_result.observation
-                    
-                except Exception as e:
-                    final_error = str(e)
-                    done_str = "true"
-                    error_str = f'"{str(e)}"'
-                    print(f"[STEP] step={step} action={action_str} reward=0.00 done={done_str} error={error_str}", flush=True)
+
+                except Exception as exc:
+                    final_error = str(exc)
+                    logger.error("Step %d error: %s", step, exc)
+                    error_str = f'"{final_error}"'
+                    step_line = (
+                        f"[STEP] step={step} action={action_str} "
+                        f"reward=0.00 done=true error={error_str}"
+                    )
+                    print(step_line, flush=True)
+                    logger.warning(step_line)
                     steps_taken = step
                     break
-            
+
             await env.close()
-    
-    except Exception as e:
-        final_error = str(e)
+            logger.info("Environment connection closed")
+
+    except Exception as exc:
+        final_error = str(exc)
         success = False
-    
-    # [END] line - EXACT FORMAT (with score)
-    # Calculate normalized score: sum(rewards) / max_possible_reward
-    # Rewards are in [0.0, 1.0], max per step is 1.0, so max total is MAX_STEPS * 1.0
-    max_possible_reward = MAX_STEPS * 1.0
+        logger.error("Episode outer error: %s", exc, exc_info=True)
+
+    # Compute normalised score
+    max_possible_reward = float(MAX_STEPS)
     total_reward = sum(rewards)
-    score = total_reward / max_possible_reward if max_possible_reward > 0 else 0.0
-    score = min(max(score, 0.0), 1.0)  # Clamp to [0, 1]
-    
+    score = min(max(total_reward / max_possible_reward if max_possible_reward > 0 else 0.0, 0.0), 1.0)
+
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     success_str = "true" if success else "false"
-    print(f"[END] success={success_str} steps={steps_taken} rewards={rewards_str}", flush=True)
-    
-    return {
+    end_line = f"[END] success={success_str} steps={steps_taken} score={score:.4f} rewards={rewards_str}"
+    print(end_line, flush=True)
+    logger.info(end_line)
+
+    if final_error:
+        logger.warning("Episode ended with error: %s", final_error)
+
+    summary = {
         "task": task,
         "difficulty": difficulty,
         "success": success,
         "steps": steps_taken,
         "total_reward": total_reward,
-        "avg_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+        "avg_reward": total_reward / len(rewards) if rewards else 0.0,
         "score": score,
         "rewards": rewards,
     }
+    logger.info("Episode summary: %s", summary)
+    return summary
 
 
 # ============================================================================
 # Main
 # ============================================================================
 
-async def main():
-    """Run evaluation on 3+ tasks."""
-    
-    tasks = [
-        ("task_easy", "easy"),
-        ("task_medium", "medium"),
-        ("task_hard", "hard"),
-    ]
-    
-    results = []
-    
+async def main() -> List[Dict[str, Any]]:
+    """Run evaluation on all configured tasks."""
+    # Tasks can be overridden via TASKS env var as comma-separated pairs:
+    # e.g. TASKS="task_easy:easy,task_medium:medium,task_hard:hard"
+    raw_tasks = os.getenv(
+        "TASKS",
+        "task_easy:easy,task_medium:medium,task_hard:hard",
+    )
+
+    tasks: List[tuple] = []
+    try:
+        for pair in raw_tasks.split(","):
+            name, diff = pair.strip().split(":")
+            tasks.append((name.strip(), diff.strip()))
+    except ValueError as exc:
+        logger.error("Invalid TASKS format '%s': %s — using defaults", raw_tasks, exc)
+        tasks = [("task_easy", "easy"), ("task_medium", "medium"), ("task_hard", "hard")]
+
+    logger.info("Starting evaluation: %d tasks, max_steps=%d, model=%s, log=%s",
+                len(tasks), MAX_STEPS, MODEL_NAME, LOG_FILE)
+
+    results: List[Dict[str, Any]] = []
+
     for task_name, difficulty in tasks:
         try:
             result = await run_episode(task_name, difficulty)
             results.append(result)
-        except Exception as e:
-            # Always emit [START] and [END] even on error
+        except Exception as exc:
+            logger.error("Task %s raised unhandled exception: %s", task_name, exc, exc_info=True)
             print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
             print(f"[END] success=false steps=0 score=0.00 rewards=", flush=True)
-            print(f"ERROR: Task {task_name} failed: {e}", file=sys.stderr)
-    
+            print(f"ERROR: Task {task_name} failed: {exc}", file=sys.stderr)
+
     return results
 
 
 if __name__ == "__main__":
     exit_code = 0
     try:
+        logger.info("inference.py started — pid=%d", os.getpid())
         results = asyncio.run(main())
-        
-        # Summary (to stderr, doesn't affect stdout format)
+
         total_success = sum(1 for r in results if r.get("success"))
+        summary_line = f"Tasks run: {len(results)} | Success: {total_success}/{len(results)}"
+        logger.info("=== %s ===", summary_line)
         print(f"\n--- Summary ---", file=sys.stderr)
-        print(f"Tasks run: {len(results)}", file=sys.stderr)
-        print(f"Success: {total_success}/{len(results)}", file=sys.stderr)
-        
-        # Exit 0 on successful completion
-        # Judges evaluate stdout format, not exit code
+        print(summary_line, file=sys.stderr)
+
+        for r in results:
+            logger.info(
+                "  task=%-14s score=%.4f total_reward=%.2f steps=%d",
+                r.get("task"), r.get("score", 0), r.get("total_reward", 0), r.get("steps", 0),
+            )
+
         exit_code = 0
-        
-    except Exception as e:
-        print(f"FATAL: {e}", file=sys.stderr)
+
+    except Exception as exc:
+        logger.critical("FATAL: %s", exc, exc_info=True)
+        print(f"FATAL: {exc}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
         exit_code = 1
-    
+
     finally:
-        # Ensure clean exit without lingering processes
+        logger.info("inference.py exiting with code %d", exit_code)
         sys.exit(exit_code)

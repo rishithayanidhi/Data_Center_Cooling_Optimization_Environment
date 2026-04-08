@@ -35,7 +35,11 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional
-from fastapi.responses import HTMLResponse
+from datetime import datetime
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
+import json
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -46,6 +50,15 @@ except Exception as e:  # pragma: no cover
     raise ImportError(
         "openenv is required for the web interface. Install dependencies with 'uv sync'"
     ) from e
+
+# Import logging service
+try:
+    from server.logging_service import get_container_logger, log_request
+except ImportError:
+    try:
+        from .logging_service import get_container_logger, log_request
+    except ImportError:
+        from logging_service import get_container_logger, log_request
 
 # Try different import styles for flexibility
 try:
@@ -65,6 +78,39 @@ TASK_TYPE = os.getenv("TASK_TYPE", "easy").lower()
 if TASK_TYPE not in ["easy", "medium", "hard"]:
     TASK_TYPE = "easy"
 
+# Operational configuration from environment variables
+MAX_CONCURRENT_ENVS = int(os.getenv("MAX_CONCURRENT_ENVS", "100"))
+NUM_ZONES = int(os.getenv("NUM_ZONES", "4"))
+
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    """Middleware to log all HTTP requests."""
+    
+    async def dispatch(self, request: Request, call_next):
+        """Log request and response."""
+        try:
+            response = await call_next(request)
+            
+            # Extract client info
+            client_ip = request.client.host if request.client else "unknown"
+            
+            # Log the request
+            log_request(
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+                client_ip=client_ip
+            )
+            
+            return response
+        except Exception as e:
+            logger = get_container_logger()
+            logger.error(f"Error processing request: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Internal server error"}
+            )
+
 
 def environment_factory() -> DataCenterCoolingEnvironment:
     """Factory function to create new environment instances."""
@@ -77,8 +123,15 @@ app = create_app(
     CoolingAction,
     CoolingObservation,
     env_name="datacenter_cooling",
-    max_concurrent_envs=100,
+    max_concurrent_envs=MAX_CONCURRENT_ENVS,
 )
+
+# Add logging middleware
+app.add_middleware(LoggingMiddleware)
+
+# Initialize logger
+logger = get_container_logger()
+logger.info("🚀 Data Center Cooling Environment Server initialized")
 
 
 @app.get("/health")
@@ -99,9 +152,9 @@ def environment_info():
         "description": "Autonomous cooling management for data centers",
         "task_types": ["easy", "medium", "hard"],
         "current_task": TASK_TYPE,
-        "num_zones": 4,
+        "num_zones": NUM_ZONES,
         "actions": {
-            "zone_id": "0-3 (which zone to adjust)",
+            "zone_id": f"0-{NUM_ZONES - 1} (which zone to adjust)",
             "cooling_adjustment": "-1.0 to +1.0 (decrease/maintain/increase)",
         },
         "observations": [
@@ -112,6 +165,139 @@ def environment_info():
             "ambient_temperature",
         ],
     }
+
+
+@app.get("/logs")
+def get_logs(limit: int = 100, level: Optional[str] = None, format: str = "json"):
+    """
+    Get container logs.
+    
+    Query Parameters:
+    - limit: Maximum number of log entries to return (default: 100)
+    - level: Filter by log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    - format: Response format (json or text)
+    
+    Returns:
+        Logs in JSON or plain text format
+    """
+    try:
+        container_logger = get_container_logger()
+        logs_data = container_logger.get_logs(limit=limit, level=level)
+        
+        if format == "text":
+            # Convert to plain text format
+            lines = []
+            for log in logs_data["logs"]:
+                timestamp = log.get("timestamp", "")
+                log_level = log.get("level", "")
+                message = log.get("message", "")
+                lines.append(f"{timestamp} [{log_level}] {message}")
+            
+            return JSONResponse(
+                content={
+                    "format": "text",
+                    "logs": "\n".join(lines),
+                    "count": logs_data["count"],
+                    "stats": logs_data["stats"]
+                }
+            )
+        else:
+            # Default JSON format
+            return logs_data
+    
+    except Exception as e:
+        logger = get_container_logger()
+        logger.error(f"Error retrieving logs: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to retrieve logs: {str(e)}"}
+        )
+
+
+@app.get("/logs/stats")
+def get_logs_stats():
+    """
+    Get container logging statistics.
+    
+    Returns:
+        Statistics about logged entries and container health
+    """
+    try:
+        container_logger = get_container_logger()
+        return {
+            "container_info": container_logger.get_container_info(),
+            "health": container_logger.get_health_status(),
+            "stats": container_logger.buffer.get_stats()
+        }
+    except Exception as e:
+        logger = get_container_logger()
+        logger.error(f"Error retrieving stats: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to retrieve stats: {str(e)}"}
+        )
+
+
+@app.get("/logs/clear")
+def clear_logs():
+    """
+    Clear all stored logs (requires admin access).
+    
+    Note: This is for development only. In production, logs should be
+    managed through a logging infrastructure.
+    
+    Returns:
+        Confirmation message
+    """
+    try:
+        # In production, you might want to add authentication here
+        container_logger = get_container_logger()
+        container_logger.buffer.clear()
+        logger.info("Logs cleared via /logs/clear endpoint")
+        return {
+            "status": "success",
+            "message": "All logs have been cleared",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger = get_container_logger()
+        logger.error(f"Error clearing logs: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to clear logs: {str(e)}"}
+        )
+
+
+@app.get("/logs/container")
+def get_container_logs():
+    """
+    Get container-specific logs with more details.
+    
+    This is the endpoint that external monitoring services may call.
+    
+    Returns:
+        Container logs and metadata
+    """
+    try:
+        container_logger = get_container_logger()
+        logs_data = container_logger.get_logs(limit=200)
+        
+        return {
+            "type": "container",
+            "logs": logs_data["logs"],
+            "summary": {
+                "total": logs_data["count"],
+                "container_info": container_logger.get_container_info(),
+                "health": container_logger.get_health_status()
+            }
+        }
+    except Exception as e:
+        logger = get_container_logger()
+        logger.error(f"Error retrieving container logs: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to retrieve container logs: {str(e)}"}
+        )
 
 
 @app.get("/web", response_class=HTMLResponse)
@@ -314,6 +500,12 @@ def web_interface():
                     <li style="margin: 10px 0;">
                         <a href="/info" class="link">ℹ️ Environment Info</a>
                     </li>
+                    <li style="margin: 10px 0;">
+                        <a href="/logs?limit=50" class="link">📋 Container Logs</a>
+                    </li>
+                    <li style="margin: 10px 0;">
+                        <a href="/logs/stats" class="link">📊 Logging Stats</a>
+                    </li>
                 </ul>
             </div>
             
@@ -357,9 +549,38 @@ def web_interface():
                             <span class="endpoint-path">/health</span>
                             <span style="color: #666;"> — Health check</span>
                         </li>
+                        <li>
+                            <span class="endpoint-method">GET</span>
+                            <span class="endpoint-path">/info</span>
+                            <span style="color: #666;"> — Environment information</span>
+                        </li>
                     </ul>
                 </div>
-            </div>
+                <div class="endpoints">
+                    <h3>Logging & Monitoring</h3>
+                    <ul class="endpoint-list">
+                        <li>
+                            <span class="endpoint-method">GET</span>
+                            <span class="endpoint-path">/logs</span>
+                            <span style="color: #666;"> — Get container logs (supports ?limit=, ?level=)</span>
+                        </li>
+                        <li>
+                            <span class="endpoint-method">GET</span>
+                            <span class="endpoint-path">/logs/container</span>
+                            <span style="color: #666;"> — Get container-specific logs and metadata</span>
+                        </li>
+                        <li>
+                            <span class="endpoint-method">GET</span>
+                            <span class="endpoint-path">/logs/stats</span>
+                            <span style="color: #666;"> — Get logging statistics and health status</span>
+                        </li>
+                        <li>
+                            <span class="endpoint-method">GET</span>
+                            <span class="endpoint-path">/logs/clear</span>
+                            <span style="color: #666;"> — Clear all stored logs (dev only)</span>
+                        </li>
+                    </ul>
+                </div>
         </div>
         
         <div class="footer">

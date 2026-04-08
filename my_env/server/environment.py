@@ -11,7 +11,9 @@ This environment simulates a realistic data center cooling management task where
 agents learn to balance thermal stability and energy efficiency.
 """
 
+import logging
 import math
+import os
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -32,71 +34,76 @@ except ImportError:
     except ImportError:
         from models import CoolingAction, CoolingObservation, CoolingState
 
+log = logging.getLogger("environment")
+
 
 class DataCenterCoolingEnvironment(Environment):
     """
     Simulates a data center cooling management task.
-    
-    The environment models a 4-zone data center where an agent must manage
+
+    The environment models a configurable-zone data center where an agent must manage
     cooling levels to maintain safe temperatures while minimizing energy consumption.
-    
-    State space:
-    - 4 Zone temperatures (°C)
-    - 4 Zone workload intensities (0.0-1.0)
-    - 4 Zone cooling levels (0.0-1.0)
-    
-    Action space:
-    - Adjust cooling in one zone by [-1, 0, +1] (or continuous in [-1, 1])
-    - Choose zone (0-3)
-    
-    Reward signal:
-    - Penalty for overheating (T > 50°C)
-    - Reward for stability
-    - Penalty for excessive cooling
-    - Reward for energy efficiency
+
+    Physics constants are read from environment variables at class-definition time so
+    they can be overridden without modifying source code.
     """
-    
+
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
-    
-    # Physics constants
-    NUM_ZONES = 4
-    AMBIENT_TEMPERATURE = 20.0
-    SAFE_TEMPERATURE_MIN = 15.0
-    SAFE_TEMPERATURE_MAX = 45.0
-    CRITICAL_TEMPERATURE = 50.0
-    
+
+    # Physics constants — all overridable via environment variables
+    NUM_ZONES: int = int(os.getenv("NUM_ZONES", "4"))
+    AMBIENT_TEMPERATURE: float = float(os.getenv("AMBIENT_TEMPERATURE", "20.0"))
+    SAFE_TEMPERATURE_MIN: float = float(os.getenv("SAFE_TEMPERATURE_MIN", "15.0"))
+    SAFE_TEMPERATURE_MAX: float = float(os.getenv("SAFE_TEMPERATURE_MAX", "45.0"))
+    CRITICAL_TEMPERATURE: float = float(os.getenv("CRITICAL_TEMPERATURE", "50.0"))
+
     # Thermal dynamics
-    THERMAL_CAPACITANCE = 10.0  # How fast temperature changes
-    COOLING_EFFICIENCY = 5.0  # How effective is cooling
-    WORKLOAD_TO_HEAT = 20.0  # How much heat workload generates
-    
+    THERMAL_CAPACITANCE: float = float(os.getenv("THERMAL_CAPACITANCE", "10.0"))
+    COOLING_EFFICIENCY: float = float(os.getenv("COOLING_EFFICIENCY", "5.0"))
+    WORKLOAD_TO_HEAT: float = float(os.getenv("WORKLOAD_TO_HEAT", "20.0"))
+
     # Energy
-    BASE_POWER = 50.0  # Base power in kW
-    COOLING_POWER_PER_UNIT = 8.0  # kW per unit of cooling
-    
+    BASE_POWER: float = float(os.getenv("BASE_POWER", "50.0"))
+    COOLING_POWER_PER_UNIT: float = float(os.getenv("COOLING_POWER_PER_UNIT", "8.0"))
+
     # Time scales
-    TIME_STEP_DURATION = 1.0  # Simulation step = 1 minute
-    
-    def __init__(self, task_type: str = "easy"):
+    TIME_STEP_DURATION: float = float(os.getenv("TIME_STEP_DURATION", "1.0"))
+
+    def __init__(self, task_type: str = "easy") -> None:
         """
         Initialize the data center cooling environment.
-        
+
         Args:
-            task_type: Type of task - "easy", "medium", or "hard"
+            task_type: Type of task — "easy", "medium", or "hard".
+                       Can also be set via TASK_TYPE env var.
         """
-        self.task_type = task_type
+        self.task_type = os.getenv("TASK_TYPE", task_type).lower()
+        if self.task_type not in ("easy", "medium", "hard"):
+            log.warning("Unknown task_type '%s'; defaulting to 'easy'", self.task_type)
+            self.task_type = "easy"
+
         self._episode_id = str(uuid4())
         self._step_count = 0
-        
-        # Episode length matches evaluation window (judges run 50 steps per task)
-        # All tasks run 50 steps; difficulty varies via workload + initial temps
-        self._max_steps = 50
-        
-        # Initialize state
-        self._zone_temperatures = [25.0] * self.NUM_ZONES
-        self._zone_cooling_levels = [0.5] * self.NUM_ZONES
-        self._zone_workload_intensity = [self._get_initial_workload() for _ in range(self.NUM_ZONES)]
-        
+
+        # Episode length — judges run 50 steps per task; overridable for local testing
+        self._max_steps = int(os.getenv("MAX_EPISODE_STEPS", "50"))
+
+        log.info(
+            "DataCenterCoolingEnvironment init — task=%s max_steps=%d zones=%d",
+            self.task_type, self._max_steps, self.NUM_ZONES,
+        )
+
+        try:
+            # Initialize state
+            self._zone_temperatures: List[float] = [25.0] * self.NUM_ZONES
+            self._zone_cooling_levels: List[float] = [0.5] * self.NUM_ZONES
+            self._zone_workload_intensity: List[float] = [
+                self._get_initial_workload() for _ in range(self.NUM_ZONES)
+            ]
+        except Exception as exc:
+            log.error("Failed to initialise environment state: %s", exc)
+            raise
+
         # Tracking
         self._thermal_violations = 0
         self._cumulative_energy = 0.0
@@ -296,66 +303,83 @@ class DataCenterCoolingEnvironment(Environment):
     def reset(self) -> CoolingObservation:
         """
         Reset the environment for a new episode.
-        
+
         Returns:
             CoolingObservation with initial state
         """
-        self._episode_id = str(uuid4())
-        self._step_count = 0
-        self._step_index = 0
-        self._thermal_violations = 0
-        self._cumulative_energy = 0.0
-        self._cumulative_reward = 0.0
-        
-        # Initialize temperatures based on task difficulty
-        # Harder tasks start with warmer, more challenging conditions
-        if self.task_type == "easy":
-            initial_temp = 30.0  # Cool start, agent has some breathing room
-        elif self.task_type == "medium":
-            initial_temp = 35.0  # Moderate start, immediate management needed
-        else:  # hard
-            initial_temp = 38.0  # Hot start, agent must respond quickly to avoid overheat
-        
-        # Add some randomness to make each episode slightly different
-        self._zone_temperatures = [
-            initial_temp + np.random.uniform(-2, 2) for _ in range(self.NUM_ZONES)
-        ]
-        
-        # Start with moderate cooling (agent must adjust)
-        self._zone_cooling_levels = [0.4] * self.NUM_ZONES
-        self._zone_workload_intensity = [self._get_initial_workload() for _ in range(self.NUM_ZONES)]
-        
-        return self._get_observation()
+        try:
+            self._episode_id = str(uuid4())
+            self._step_count = 0
+            self._step_index = 0
+            self._thermal_violations = 0
+            self._cumulative_energy = 0.0
+            self._cumulative_reward = 0.0
+
+            # Initial temperatures vary by task difficulty
+            initial_temp_map = {
+                "easy": float(os.getenv("INITIAL_TEMP_EASY", "30.0")),
+                "medium": float(os.getenv("INITIAL_TEMP_MEDIUM", "35.0")),
+                "hard": float(os.getenv("INITIAL_TEMP_HARD", "38.0")),
+            }
+            initial_temp = initial_temp_map.get(self.task_type, 30.0)
+
+            self._zone_temperatures = [
+                initial_temp + np.random.uniform(-2, 2) for _ in range(self.NUM_ZONES)
+            ]
+            self._zone_cooling_levels = [0.4] * self.NUM_ZONES
+            self._zone_workload_intensity = [
+                self._get_initial_workload() for _ in range(self.NUM_ZONES)
+            ]
+
+            log.info(
+                "reset — episode=%s task=%s initial_temps=%s",
+                self._episode_id, self.task_type,
+                [round(t, 1) for t in self._zone_temperatures],
+            )
+            return self._get_observation()
+        except Exception as exc:
+            log.error("reset failed: %s", exc, exc_info=True)
+            raise
     
     def step(self, action: CoolingAction) -> CoolingObservation:  # type: ignore[override]
         """
         Execute one step of the environment.
-        
+
         Args:
             action: CoolingAction with zone and cooling adjustment
-            
+
         Returns:
             CoolingObservation with updated state
         """
-        self._step_count += 1
-        self._step_index += 1
-        
-        # Apply the action
-        actions_applied = [(action.zone_id, action.cooling_adjustment)]
-        self._update_temperatures(actions_applied)
-        
-        # Calculate reward
-        reward, _ = self._calculate_reward()
-        self._cumulative_reward += reward
-        
-        # Check if episode is done
-        done = self._step_count >= self._max_steps or max(self._zone_temperatures) > 70.0
-        
-        obs = self._get_observation()
-        obs.done = done
-        obs.reward = reward
-        
-        return obs
+        try:
+            self._step_count += 1
+            self._step_index += 1
+
+            actions_applied = [(action.zone_id, action.cooling_adjustment)]
+            self._update_temperatures(actions_applied)
+
+            reward, breakdown = self._calculate_reward()
+            self._cumulative_reward += reward
+
+            done = (
+                self._step_count >= self._max_steps
+                or max(self._zone_temperatures) > 70.0
+            )
+
+            log.debug(
+                "step=%d zone=%d adj=%.2f reward=%.4f done=%s max_temp=%.1f",
+                self._step_count, action.zone_id, action.cooling_adjustment,
+                reward, done, max(self._zone_temperatures),
+            )
+
+            obs = self._get_observation()
+            obs.done = done
+            obs.reward = reward
+            return obs
+
+        except Exception as exc:
+            log.error("step %d failed: %s", self._step_count, exc, exc_info=True)
+            raise
     
     def _get_observation(self) -> CoolingObservation:
         """
