@@ -106,10 +106,11 @@ def get_llm_client() -> OpenAI:
                 azure_endpoint=os.getenv("AZURE_ENDPOINT"),
             )
         else:
-            logger.info("Initialising OpenAI client (base_url=%s, model=%s)", API_BASE_URL, MODEL_NAME)
+            openai_base_url = os.getenv("OPENAI_BASE_URL")  # separate from env API_BASE_URL
+            logger.info("Initialising OpenAI client (base_url=%s, model=%s)", openai_base_url or "default", MODEL_NAME)
             return OpenAI(
-                api_key=HF_TOKEN or os.getenv("OPENAI_API_KEY", "sk-mock"),
-                base_url=API_BASE_URL if "http" in API_BASE_URL else None,
+                api_key=os.getenv("OPENAI_API_KEY", "sk-mock"),
+                base_url=openai_base_url or None,
             )
     except Exception as exc:
         logger.error("Failed to initialise LLM client: %s", exc)

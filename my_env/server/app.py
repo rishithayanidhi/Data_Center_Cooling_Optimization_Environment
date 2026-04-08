@@ -38,7 +38,7 @@ from typing import Optional
 from datetime import datetime
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi import Request, Query
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 import json
 
 # Add parent directory to path for imports
@@ -83,33 +83,37 @@ MAX_CONCURRENT_ENVS = int(os.getenv("MAX_CONCURRENT_ENVS", "100"))
 NUM_ZONES = int(os.getenv("NUM_ZONES", "4"))
 
 
-class LoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware to log all HTTP requests."""
-    
-    async def dispatch(self, request: Request, call_next):
-        """Log request and response."""
-        try:
-            response = await call_next(request)
-            
-            # Extract client info
-            client_ip = request.client.host if request.client else "unknown"
-            
-            # Log the request
-            log_request(
-                method=request.method,
-                path=request.url.path,
-                status_code=response.status_code,
-                client_ip=client_ip
-            )
-            
-            return response
-        except Exception as e:
-            logger = get_container_logger()
-            logger.error(f"Error processing request: {str(e)}")
-            return JSONResponse(
-                status_code=500,
-                content={"error": "Internal server error"}
-            )
+class LoggingMiddleware:
+    """ASGI middleware to log HTTP requests (skips WebSocket scopes)."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            # Wrap send to capture the status code
+            status_code = 200
+            original_send = send
+
+            async def send_wrapper(message):
+                nonlocal status_code
+                if message["type"] == "http.response.start":
+                    status_code = message.get("status", 200)
+                await original_send(message)
+
+            await self.app(scope, receive, send_wrapper)
+
+            try:
+                client = scope.get("client")
+                client_ip = client[0] if client else "unknown"
+                method = scope.get("method", "GET")
+                path = scope.get("path", "/")
+                log_request(method=method, path=path, status_code=status_code, client_ip=client_ip)
+            except Exception:
+                pass
+        else:
+            # Pass WebSocket and lifespan scopes through unchanged
+            await self.app(scope, receive, send)
 
 
 def environment_factory() -> DataCenterCoolingEnvironment:
