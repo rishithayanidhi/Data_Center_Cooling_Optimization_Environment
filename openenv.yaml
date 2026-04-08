@@ -1,0 +1,16 @@
+spec_version: 1
+name: datacenter_cooling
+description: Autonomous Data Center Cooling Optimization Environment
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+tags:
+  - reinforcement-learning
+  - optimization
+  - data-center
+  - autonomous-control
+categories:
+  - operations
+sdk: docker
+
