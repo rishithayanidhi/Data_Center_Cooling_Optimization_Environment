@@ -5,7 +5,7 @@ Inference script for Data Center Cooling Optimization Environment.
 EXACT OUTPUT FORMAT REQUIRED BY JUDGES (Organizer Spec):
 - [START] task=<task_name> env=<benchmark> model=<model_name>
 - [STEP] step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-- [END] success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
+- [END] success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
 import asyncio
@@ -18,11 +18,7 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
 # Required: OpenAI Client
-try:
-    from openai import OpenAI
-except ImportError:
-    print("ERROR: OpenAI client not installed. Run: pip install openai", file=sys.stderr)
-    sys.exit(1)
+from openai import OpenAI
 
 # Environment imports
 try:
@@ -70,6 +66,8 @@ MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o")
 HF_TOKEN = os.getenv("HF_TOKEN")
 if HF_TOKEN is None:
     raise ValueError("HF_TOKEN environment variable is required")
+# Optional — if you use from_docker_image():
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 # ENV_BASE_URL: URL of the deployed environment server (our HF Space)
 ENV_BASE_URL = os.getenv(
     "ENV_BASE_URL",
