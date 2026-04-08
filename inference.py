@@ -208,19 +208,9 @@ def parse_action(action_str: str) -> CoolingAction:
 # Episode Runner
 # ============================================================================
 
-async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
+async def run_episode(task: str, difficulty: str, client: OpenAI) -> Dict[str, Any]:
     """Run single episode with exact output format."""
     logger.info("=== Episode start: task=%s difficulty=%s model=%s ===", task, difficulty, MODEL_NAME)
-
-    try:
-        client = get_llm_client()
-    except Exception as exc:
-        logger.critical("Cannot create LLM client: %s", exc)
-        print(f"[START] task={task} env={BENCHMARK} model={MODEL_NAME}", flush=True)
-        print(f"[END] success=false steps=0 score=0.00 rewards=", flush=True)
-        return {"task": task, "difficulty": difficulty, "success": False,
-                "steps": 0, "total_reward": 0.0, "avg_reward": 0.0,
-                "score": 0.0, "rewards": []}
 
     # [START] line — required by judge spec
     print(f"[START] task={task} env={BENCHMARK} model={MODEL_NAME}", flush=True)
@@ -357,11 +347,20 @@ async def main() -> List[Dict[str, Any]]:
     logger.info("Starting evaluation: %d tasks, max_steps=%d, model=%s, log=%s",
                 len(tasks), MAX_STEPS, MODEL_NAME, LOG_FILE)
 
+    try:
+        client = get_llm_client()
+    except Exception as exc:
+        logger.critical("Cannot create LLM client: %s", exc)
+        for task_name, _ in tasks:
+            print(f"[START] task={task_name} env={BENCHMARK} model={MODEL_NAME}", flush=True)
+            print(f"[END] success=false steps=0 score=0.00 rewards=", flush=True)
+        return []
+
     results: List[Dict[str, Any]] = []
 
     for task_name, difficulty in tasks:
         try:
-            result = await run_episode(task_name, difficulty)
+            result = await run_episode(task_name, difficulty, client)
             results.append(result)
         except Exception as exc:
             logger.error("Task %s raised unhandled exception: %s", task_name, exc, exc_info=True)
