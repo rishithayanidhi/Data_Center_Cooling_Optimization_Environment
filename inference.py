@@ -60,8 +60,8 @@ class _AuthEnv(DataCenterCoolingEnv):
 # ============================================================================
 
 # API_BASE_URL: LLM API endpoint (per submission spec)
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 # HF_TOKEN: mandatory — used as api_key for the LLM client
 HF_TOKEN = os.getenv("HF_TOKEN")
 if HF_TOKEN is None:
