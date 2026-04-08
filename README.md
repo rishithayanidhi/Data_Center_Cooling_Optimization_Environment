@@ -6,6 +6,7 @@ colorTo: green
 sdk: docker
 app_port: 8000
 pinned: false
+startup_duration_timeout: 1h
 ---
 
 # Data Center Cooling Optimization Environment
