@@ -170,7 +170,7 @@ async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
                     final_error = str(e)
                     done_str = "true"
                     error_str = f'"{str(e)}"'
-                    print(f"[STEP] step={step} action=ERROR reward=0.00 done={done_str} error={error_str}", flush=True)
+                    print(f"[STEP] step={step} action={action_str} reward=0.00 done={done_str} error={error_str}", flush=True)
                     steps_taken = step
                     break
             
@@ -190,7 +190,7 @@ async def run_episode(task: str, difficulty: str) -> Dict[str, Any]:
     
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     success_str = "true" if success else "false"
-    print(f"[END] success={success_str} steps={steps_taken} score={score:.2f} rewards={rewards_str}", flush=True)
+    print(f"[END] success={success_str} steps={steps_taken} rewards={rewards_str}", flush=True)
     
     return {
         "task": task,
