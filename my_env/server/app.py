@@ -36,8 +36,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi import Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import Request, Query
 from starlette.middleware.base import BaseHTTPMiddleware
 import json
 
@@ -298,6 +298,34 @@ def get_container_logs():
             status_code=500,
             content={"error": f"Failed to retrieve container logs: {str(e)}"}
         )
+
+
+@app.get("/")
+def root(logs: Optional[str] = Query(default=None)):
+    """
+    Root endpoint. If ?logs=container is provided (e.g. by Hugging Face Spaces
+    monitoring), returns container logs. Otherwise redirects to the web UI.
+    """
+    if logs == "container":
+        try:
+            container_logger = get_container_logger()
+            logs_data = container_logger.get_logs(limit=200)
+            return {
+                "type": "container",
+                "logs": logs_data["logs"],
+                "summary": {
+                    "total": logs_data["count"],
+                    "container_info": container_logger.get_container_info(),
+                    "health": container_logger.get_health_status(),
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error retrieving container logs at root: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"Failed to retrieve container logs: {str(e)}"},
+            )
+    return RedirectResponse(url="/web")
 
 
 @app.get("/web", response_class=HTMLResponse)
