@@ -652,15 +652,4 @@ def main(host: str = "0.0.0.0", port: int = 8000):
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--task", type=str, default="easy", choices=["easy", "medium", "hard"])
-    args = parser.parse_args()
-    
-    # Override TASK_TYPE from command line if provided
-    if args.task:
-        os.environ["TASK_TYPE"] = args.task
-    
-    main(port=args.port)
+    main()
