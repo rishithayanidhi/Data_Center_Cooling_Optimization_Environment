@@ -19,9 +19,9 @@ dev = [
 ]
 
 [project.scripts]
-server = "my_env.server.app:main"
+server = "server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["my_env", "my_env.server"]
-package-dir = { "my_env" = "my_env", "my_env.server" = "my_env/server" }
+packages = ["my_env", "my_env.server", "server"]
+package-dir = { "my_env" = "my_env", "my_env.server" = "my_env/server", "server" = "server" }
